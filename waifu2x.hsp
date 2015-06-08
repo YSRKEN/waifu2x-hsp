@@ -1,0 +1,258 @@
+/* waifu2xをHSPで再現するという世にも無謀な試み
+ * 【流れ】
+ * 画像読み込み→json読み込み→処理→画像出力
+ * 【jsonのデータ構造】
+ * ルート：直下にブロックの配列が適当な数置かれている
+ * ブロック：weightという配列・nOutputPlane・kW：kH・biasという配列・nInputPlaneが置かれている
+ * weight：nOutputPlane個の配列⇒nInputPlane個の配列⇒kW個の配列⇒kH個の実数という順に置いてある(たぶん)
+ * bias：nOutputPlane個の実数
+ * 【注意】
+ * ・modelsフォルダをこのhspファイルと同じフォルダに置いてください
+ * ・noise_scaleしたい人はデノイズしてから拡大してね
+ * ・死ぬほど重いのでコードの勉強にする程度でお願いします
+ */
+
+#include "hspinet.as"
+#const NULL 0
+
+/* 入力 */
+input_name = "sample.png"
+output_name = "result.bmp"
+mode = 0	;0→2x倍、1→デノイズレベル1、2→デノイズレベル2
+
+/* 画像を読み込み */
+buffer 1 :picload input_name
+// YCbCrとして変換する
+picture_size_x = ginfo_sx :picture_size_y = ginfo_sy
+ddim pic_y,  picture_size_x, picture_size_y
+ddim pic_cb, picture_size_x, picture_size_y
+ddim pic_cr, picture_size_x, picture_size_y
+for y, 0, picture_size_y
+	for x, 0, picture_size_x
+		pget x, y
+		/* ITU-R BT.601
+		 * 参考：
+		 * http://koujinz.cocolog-nifty.com/blog/2009/03/rgbycbcr-5d00.html
+		 */
+		pic_y(x, y)  =  0.29900 * ginfo_r + 0.58700 * ginfo_g + 0.11400 * ginfo_b
+		pic_cb(x, y) = -0.16874 * ginfo_r - 0.33126 * ginfo_g + 0.50000 * ginfo_b
+		pic_cr(x, y) =  0.50000 * ginfo_r - 0.41869 * ginfo_g - 0.08131 * ginfo_b
+	next
+next
+// 最近傍法で2xの下地を作成する(デノイズするだけなら不要)
+if(mode == 0){
+	ddim pic_y_2x,  picture_size_x * 2, picture_size_y * 2
+	ddim pic_cb_2x, picture_size_x * 2, picture_size_y * 2
+	ddim pic_cr_2x, picture_size_x * 2, picture_size_y * 2
+	for y, 0, picture_size_y * 2
+		for x, 0, picture_size_x * 2
+			pic_y_2x(x, y)  = pic_y(x / 2, y / 2) 
+			pic_cb_2x(x, y) = pic_cb(x / 2, y / 2)
+			pic_cr_2x(x, y) = pic_cr(x / 2, y / 2)
+		next
+	next
+	picture_size_x *= 2 :picture_size_y *= 2
+	ddim pic_y,  picture_size_x, picture_size_y
+	ddim pic_cb, picture_size_x, picture_size_y
+	ddim pic_cr, picture_size_x, picture_size_y
+	memcpy pic_y,  pic_y_2x,  picture_size_x * picture_size_y * 8
+	memcpy pic_cb, pic_cb_2x, picture_size_x * picture_size_y * 8
+	memcpy pic_cr, pic_cr_2x, picture_size_x * picture_size_y * 8
+}
+gsel 0
+mes "" + gettime(0) + " " + gettime(1) + " " + gettime(3) + " " + gettime(4) + " " + gettime(5) + " " + gettime(6)
+mes "画像読み込み完了"
+
+/* jsonデータを読み込み */
+notesel json_data
+switch mode
+	case 0
+		noteload "models\\scale2.0x_model.json"
+		swbreak
+	case 1
+		noteload "models\\noise1_model.json"
+		swbreak
+	case 2
+		noteload "models\\noise2_model.json"
+		swbreak
+swend
+// ここで謎の置換をしているのは、HSPのjson読み込みでは
+// 「整数・文字列はできるのに実数を取得する命令がない」
+// というどうしようもないクソな仕様があるため
+strrep json_data, "[-", "[\"-"
+strrep json_data, "[0", "[\"0"
+strrep json_data, "[1", "[\"1"
+strrep json_data, "[2", "[\"2"
+strrep json_data, "[3", "[\"3"
+strrep json_data, "[4", "[\"4"
+strrep json_data, "[5", "[\"5"
+strrep json_data, "[6", "[\"6"
+strrep json_data, "[7", "[\"7"
+strrep json_data, "[8", "[\"8"
+strrep json_data, "[9", "[\"9"
+
+strrep json_data, ",-", "\",\"-"
+strrep json_data, ",0", "\",\"0"
+strrep json_data, ",1", "\",\"1"
+strrep json_data, ",2", "\",\"2"
+strrep json_data, ",3", "\",\"3"
+strrep json_data, ",4", "\",\"4"
+strrep json_data, ",5", "\",\"5"
+strrep json_data, ",6", "\",\"6"
+strrep json_data, ",7", "\",\"7"
+strrep json_data, ",8", "\",\"8"
+strrep json_data, ",9", "\",\"9"
+
+strrep json_data, "0]", "0\"]"
+strrep json_data, "1]", "1\"]"
+strrep json_data, "2]", "2\"]"
+strrep json_data, "3]", "3\"]"
+strrep json_data, "4]", "4\"]"
+strrep json_data, "5]", "5\"]"
+strrep json_data, "6]", "6\"]"
+strrep json_data, "7]", "7\"]"
+strrep json_data, "8]", "8\"]"
+strrep json_data, "9]", "9\"]"
+
+jsonopen json_ptr,json_data
+// 各ブロックのJSONポインタを配列で取得する
+// (可変長なので二度読みしないといけないのがHSPの性)
+block_ptr_ = json_ptr
+block_count = 0	;ルート直下のブロックの数
+jsonnext block_ptr_, json_ptr, 2
+while(block_ptr_ != NULL)
+	block_count++
+	// イテレートする
+	jsonnext block_ptr_, block_ptr_, 0
+wend
+dim block_ptr, block_count
+block_ptr_ = json_ptr
+block_count_ = 0
+jsonnext block_ptr_, json_ptr, 2
+while(block_ptr_ != NULL)
+	block_ptr(block_count_) = block_ptr_
+	block_count_++
+	// イテレートする
+	jsonnext block_ptr_, block_ptr_, 0
+wend
+mes "json読み込み完了"
+
+/* 各ブロックの情報を取得しつつ、画像を処理する */
+// とりあえず処理する成分(Y)を[0, 1]に正規化する
+// ただし外周部分には、ステップ数だけの余裕を持たせている
+// (外周部分は辺のコピー値。元ネタじゃステップ数だけしか
+// 増やしてなかったので、最初から3x3しか想定してない可能性も)
+picture_size_x_i = picture_size_x + block_count * 2
+picture_size_y_i = picture_size_y + block_count * 2
+ddim pic_y_input, picture_size_x_i, picture_size_y_i, 1
+for y, 0, picture_size_y_i
+	for x, 0, picture_size_x_i
+		x_ = limit(x - block_count, 0, picture_size_x - 1)
+		y_ = limit(y - block_count, 0, picture_size_y - 1)
+		pic_y_input(x, y, 0) = pic_y(x_, y_) / 255.0
+	next
+next
+
+// メインループ
+for k, 0, block_count
+	// 各ブロックの情報を取得する
+	jsongeti nOutputPlane, "nOutputPlane", block_ptr(k)
+	jsongeti kW,           "kW",           block_ptr(k)
+	jsongeti kH,           "kH",           block_ptr(k)
+	jsongeti nInputPlane,  "nInputPlane",  block_ptr(k)
+	;weightは複雑な配列なので読み込みも大変！
+	ddim weight, nOutputPlane, nInputPlane, kW, kH
+	jsongetobj weight_ptr, "weight", block_ptr(k)
+	jsonnext weight_ptr_1, weight_ptr, 2
+	for i1, 0, nOutputPlane
+		jsonnext weight_ptr_2, weight_ptr_1, 2
+		for i2, 0, nInputPlane
+			jsonnext weight_ptr_3, weight_ptr_2, 2
+			for i3, 0, kW
+				jsonnext weight_ptr_4, weight_ptr_3, 2
+				for i4, 0, kH
+					jsongets string, "", weight_ptr_4
+					weight(i1, i2, i3, i4) = double(string)
+					jsonnext weight_ptr_4, weight_ptr_4, 0
+				next
+				jsonnext weight_ptr_3, weight_ptr_3, 0
+			next
+			jsonnext weight_ptr_2, weight_ptr_2, 0
+		next
+		jsonnext weight_ptr_1, weight_ptr_1, 0
+	next
+	;一方biasは1段で済むからマジで助かる
+	ddim bias, nOutputPlane
+	jsongetobj bias_ptr_,   "bias",   block_ptr(k)
+	jsonnext bias_ptr, bias_ptr_, 2
+	for i, 0, nOutputPlane
+		jsongets string, "", bias_ptr
+		bias(i) = double(string)
+		jsonnext bias_ptr, bias_ptr, 0
+	next
+	// 画像を処理する
+	picture_size_x_o = picture_size_x_i - 2	;この2は、(フィルタ幅3 - 1) / 2 * 2なので
+	picture_size_y_o = picture_size_y_i - 2	;とどのつまり決め打ち
+	ddim pic_y_output, picture_size_x_o, picture_size_y_o, nOutputPlane
+	;地獄の畳み込み処理
+	for i, 0, nOutputPlane
+		title "" + (i + 1) + "/" + nOutputPlane
+		wait 10
+		;延々とkH×kWのフィルタを掛けていく
+		for j, 0, nInputPlane
+			for y, 0, picture_size_y_o
+				for x, 0, picture_size_x_o
+					for q, 0, kH
+						for p, 0, kW
+							pic_y_output(x, y, i) += weight(i, j, p, q) * pic_y_input(x + p, y + q, j)
+						next
+					next
+				next
+			next
+		next
+		;バイアスを掛けておく
+		for y, 0, picture_size_y_o
+			for x, 0, picture_size_x_o
+				pic_y_output(x, y, i) += bias(i)
+			next
+		next
+	next
+	;そして次のステップへ
+	ddim pic_y_input, picture_size_x_o, picture_size_y_o, nOutputPlane	;HSPでは配列の再宣言は自由！
+	for i, 0, nOutputPlane
+		for y, 0, picture_size_y_o
+			for x, 0, picture_size_x_o
+				if(pic_y_output(x, y, i) < 0.0){
+					pic_y_input(x, y, i) = 0.1 * pic_y_output(x, y, i)
+				}else{
+					pic_y_input(x, y, i) = pic_y_output(x, y, i)
+				}
+			next
+		next
+	next
+	picture_size_x_i = picture_size_x_o
+	picture_size_y_i = picture_size_y_o
+	mes "　ステップ" + (k + 1) + "終了"
+next
+mes "画像処理完了"
+mes "" + gettime(0) + " " + gettime(1) + " " + gettime(3) + " " + gettime(4) + " " + gettime(5) + " " + gettime(6)
+
+/* 処理結果を書き出す */
+buffer 2, picture_size_x_i, picture_size_y_i
+for y, 0, picture_size_y_i
+	for x, 0, picture_size_x_i
+		/* 参考：
+		 * http://koujinz.cocolog-nifty.com/blog/2009/03/rgbycbcr-5d00.html
+		 */
+		yy = 1.0 * limitf(pic_y_input(x, y, 0), 0.0, 1.0) * 255
+		cb = 1.0 * pic_cb(x, y)
+		cr = 1.0 * pic_cr(x, y)
+		r = int(limitf(0.0, 255.0, yy + 1.40200 * cr))
+		g = int(limitf(0.0, 255.0, yy - 0.34414 * cb - 0.71414 * cr))
+		b = int(limitf(0.0, 255.0, yy + 1.77200 * cb))
+		color r, g, b
+		pset x, y
+	next
+next
+bmpsave output_name
+stop
