@@ -10,15 +10,15 @@
  * ・modelsフォルダをこのhspファイルと同じフォルダに置いてください
  * ・noise_scaleしたい人はデノイズしてから拡大してね
  * ・死ぬほど重いのでコードの勉強にする程度でお願いします
+ * (i5-3210Mで32x32x画像の2xに24分7秒、デノイズに7分27秒も掛かる)
  */
-
 #include "hspinet.as"
 #const NULL 0
 
 /* 入力 */
-input_name = "sample.png"
-output_name = "result.bmp"
-mode = 0	;0→2x倍、1→デノイズレベル1、2→デノイズレベル2
+input_name = "sample.jpg"
+output_name = "result_n1.bmp"
+mode = 1	;0→2x倍、1→デノイズレベル1、2→デノイズレベル2
 
 /* 画像を読み込み */
 buffer 1 :picload input_name
